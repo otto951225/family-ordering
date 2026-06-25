@@ -55,19 +55,13 @@ export function mapSupabaseState(input: {
   menus: ConfirmedMenuRow[];
 }): Omit<SupabaseOrderingState, "family"> {
   const mealByTableId = new Map(input.diningTables.map((table) => [table.id, table.meal_type]));
-  const table: DiningTableState = {
-    breakfast: [],
-    lunch: [],
-    dinner: [],
-  };
+  const table: DiningTableState = { breakfast: [], lunch: [], dinner: [] };
 
   input.diningItems
     .toSorted((a, b) => a.sort_order - b.sort_order)
     .forEach((item) => {
       const mealType = mealByTableId.get(item.dining_table_id);
-      if (!mealType) {
-        return;
-      }
+      if (!mealType) return;
 
       table[mealType].push({
         id: item.id,
@@ -112,16 +106,18 @@ export async function fetchSupabaseOrderingState(
     supabase.from("dining_tables").select("id, meal_type").eq("family_id", family.id).eq("dining_date", diningDate),
     supabase
       .from("confirmed_menus")
-      .select("id, family_id, dining_table_id, dining_date, meal_type, version, confirmed_by_name, confirmed_at, confirmed_menu_items(dish_id, dish_name_snapshot, image_url_snapshot, sort_order)")
+      .select(
+        "id, family_id, dining_table_id, dining_date, meal_type, version, confirmed_by_name, confirmed_at, confirmed_menu_items(dish_id, dish_name_snapshot, image_url_snapshot, sort_order)",
+      )
       .eq("family_id", family.id)
       .order("confirmed_at", { ascending: false })
       .limit(50),
   ]);
 
-  if (categoriesResult.error) throw categoriesResult.error;
-  if (dishesResult.error) throw dishesResult.error;
-  if (tablesResult.error) throw tablesResult.error;
-  if (menusResult.error) throw menusResult.error;
+  throwSupabaseError(categoriesResult.error, "读取分类失败");
+  throwSupabaseError(dishesResult.error, "读取菜品失败");
+  throwSupabaseError(tablesResult.error, "读取餐桌失败");
+  throwSupabaseError(menusResult.error, "读取菜单失败");
 
   const diningTables = (tablesResult.data ?? []) as DiningTableRow[];
   const tableIds = diningTables.map((table) => table.id);
@@ -145,7 +141,7 @@ export async function updateSupabaseFamilyName(familySlug: string, name: string)
   const supabase = getRequiredClient();
   const family = await ensureFamily(supabase, familySlug);
   const { error } = await supabase.from("families").update({ name }).eq("id", family.id);
-  if (error) throw error;
+  throwSupabaseError(error, "更新家庭名称失败");
 }
 
 export async function toggleSupabaseDish(params: {
@@ -166,11 +162,11 @@ export async function toggleSupabaseDish(params: {
     .eq("dining_table_id", tableId)
     .eq("dish_id", params.dish.id)
     .maybeSingle();
-  if (existingError) throw existingError;
+  throwSupabaseError(existingError, "读取餐桌菜品失败");
 
   if (existing) {
     const { error } = await supabase.from("dining_table_items").delete().eq("id", existing.id);
-    if (error) throw error;
+    throwSupabaseError(error, "移除餐桌菜品失败");
     return;
   }
 
@@ -178,7 +174,7 @@ export async function toggleSupabaseDish(params: {
     .from("dining_table_items")
     .select("id", { count: "exact", head: true })
     .eq("dining_table_id", tableId);
-  if (countError) throw countError;
+  throwSupabaseError(countError, "统计餐桌菜品失败");
 
   const { error } = await supabase.from("dining_table_items").insert({
     dining_table_id: tableId,
@@ -187,13 +183,13 @@ export async function toggleSupabaseDish(params: {
     created_by_client_id: params.clientId,
     created_by_name: params.name,
   });
-  if (error) throw error;
+  throwSupabaseError(error, "添加餐桌菜品失败");
 }
 
 export async function removeSupabaseDish(itemId: string) {
   const supabase = getRequiredClient();
   const { error } = await supabase.from("dining_table_items").delete().eq("id", itemId);
-  if (error) throw error;
+  throwSupabaseError(error, "移除餐桌菜品失败");
 }
 
 export async function clearSupabaseTable(params: { familySlug: string; diningDate: string; mealType: MealType }) {
@@ -201,7 +197,7 @@ export async function clearSupabaseTable(params: { familySlug: string; diningDat
   const family = await ensureFamily(supabase, params.familySlug);
   const tableId = await ensureDiningTable(supabase, family.id, params.diningDate, params.mealType);
   const { error } = await supabase.from("dining_table_items").delete().eq("dining_table_id", tableId);
-  if (error) throw error;
+  throwSupabaseError(error, "清空餐桌失败");
 }
 
 export async function moveSupabaseDish(params: {
@@ -215,10 +211,7 @@ export async function moveSupabaseDish(params: {
   const items = state.table[params.mealType];
   const index = items.findIndex((item) => item.dish_id === params.dishId);
   const targetIndex = params.direction === "up" ? index - 1 : index + 1;
-
-  if (index < 0 || targetIndex < 0 || targetIndex >= items.length) {
-    return;
-  }
+  if (index < 0 || targetIndex < 0 || targetIndex >= items.length) return;
 
   const reordered = [...items];
   const [item] = reordered.splice(index, 1);
@@ -251,7 +244,7 @@ export async function confirmSupabaseMenu(params: {
     throw new Error("当前餐桌还没有菜品");
   }
 
-  const { data: latest } = await supabase
+  const { data: latest, error: latestError } = await supabase
     .from("confirmed_menus")
     .select("version")
     .eq("family_id", family.id)
@@ -260,6 +253,7 @@ export async function confirmSupabaseMenu(params: {
     .order("version", { ascending: false })
     .limit(1)
     .maybeSingle();
+  throwSupabaseError(latestError, "读取菜单版本失败");
 
   const version = ((latest?.version as number | undefined) ?? 0) + 1;
   const { data: menu, error: menuError } = await supabase
@@ -275,13 +269,11 @@ export async function confirmSupabaseMenu(params: {
     })
     .select("id, family_id, dining_table_id, dining_date, meal_type, version, confirmed_by_name, confirmed_at")
     .single();
-  if (menuError) throw menuError;
+  throwSupabaseError(menuError, "创建确认菜单失败");
 
   const snapshots = selectedItems.map((item, index) => {
     const dish = dishById.get(item.dish_id);
-    if (!dish) {
-      throw new Error("餐桌中包含不存在的菜品");
-    }
+    if (!dish) throw new Error("餐桌中包含不存在的菜品");
     return {
       confirmed_menu_id: menu.id,
       dish_id: dish.id,
@@ -292,8 +284,7 @@ export async function confirmSupabaseMenu(params: {
   });
 
   const { error: itemsError } = await supabase.from("confirmed_menu_items").insert(snapshots);
-  if (itemsError) throw itemsError;
-
+  throwSupabaseError(itemsError, "保存菜单快照失败");
   await supabase.from("dining_tables").update({ status: "confirmed" }).eq("id", tableId).throwOnError();
 
   return {
@@ -310,11 +301,8 @@ export async function confirmSupabaseMenu(params: {
 export async function saveSupabaseCategory(familySlug: string, category: Category) {
   const supabase = getRequiredClient();
   const family = await ensureFamily(supabase, familySlug);
-  const { error } = await supabase.from("categories").upsert({
-    ...category,
-    family_id: family.id,
-  });
-  if (error) throw error;
+  const { error } = await supabase.from("categories").upsert({ ...category, family_id: family.id });
+  throwSupabaseError(error, "保存分类失败");
 }
 
 export async function deleteSupabaseCategory(categoryId: string) {
@@ -323,38 +311,31 @@ export async function deleteSupabaseCategory(categoryId: string) {
     .from("dishes")
     .select("id", { count: "exact", head: true })
     .eq("category_id", categoryId);
-  if (countError) throw countError;
-  if ((count ?? 0) > 0) {
-    throw new Error("该分类下还有菜品，请先移动或删除菜品");
-  }
+  throwSupabaseError(countError, "检查分类菜品失败");
+  if ((count ?? 0) > 0) throw new Error("该分类下还有菜品，请先移动或删除菜品");
 
   const { error } = await supabase.from("categories").delete().eq("id", categoryId);
-  if (error) throw error;
+  throwSupabaseError(error, "删除分类失败");
 }
 
 export async function saveSupabaseDish(familySlug: string, dish: Dish) {
   const supabase = getRequiredClient();
   const family = await ensureFamily(supabase, familySlug);
-  const { error } = await supabase.from("dishes").upsert({
-    ...dish,
-    family_id: family.id,
-  });
-  if (error) throw error;
+  const { error } = await supabase.from("dishes").upsert({ ...dish, family_id: family.id });
+  throwSupabaseError(error, "保存菜品失败");
 }
 
 export async function deleteSupabaseDish(dishId: string) {
   const supabase = getRequiredClient();
   const { error } = await supabase.from("dishes").delete().eq("id", dishId);
-  if (error) throw error;
+  throwSupabaseError(error, "删除菜品失败");
 }
 
 export function subscribeSupabaseOrdering(onChange: () => void): RealtimeChannel | null {
   const supabase = createBrowserSupabaseClient();
-  if (!supabase) {
-    return null;
-  }
+  if (!supabase) return null;
 
-  const channel = supabase
+  return supabase
     .channel("family-ordering-realtime")
     .on("postgres_changes", { event: "*", schema: "public", table: "categories" }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "dishes" }, onChange)
@@ -363,15 +344,11 @@ export function subscribeSupabaseOrdering(onChange: () => void): RealtimeChannel
     .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_menus" }, onChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_menu_items" }, onChange)
     .subscribe();
-
-  return channel;
 }
 
 export function unsubscribeSupabaseOrdering(channel: RealtimeChannel | null) {
   const supabase = createBrowserSupabaseClient();
-  if (supabase && channel) {
-    void supabase.removeChannel(channel);
-  }
+  if (supabase && channel) void supabase.removeChannel(channel);
 }
 
 async function fetchDiningItems(supabase: SupabaseClient, tableIds: string[]): Promise<DiningItemRow[]> {
@@ -380,13 +357,13 @@ async function fetchDiningItems(supabase: SupabaseClient, tableIds: string[]): P
     .select("id, dining_table_id, dish_id, sort_order, created_by_client_id, created_by_name, created_at")
     .in("dining_table_id", tableIds)
     .order("sort_order");
-  if (error) throw error;
+  throwSupabaseError(error, "读取餐桌菜品失败");
   return (data ?? []) as DiningItemRow[];
 }
 
 async function ensureFamily(supabase: SupabaseClient, familySlug: string): Promise<Family> {
   const { data, error } = await supabase.from("families").select("*").eq("slug", familySlug).maybeSingle();
-  if (error) throw error;
+  throwSupabaseError(error, "读取家庭空间失败");
   if (data) return data as Family;
 
   const { data: created, error: createError } = await supabase
@@ -394,7 +371,7 @@ async function ensureFamily(supabase: SupabaseClient, familySlug: string): Promi
     .insert({ slug: familySlug, name: familySlug === "home" ? "家庭餐桌" : familySlug })
     .select("*")
     .single();
-  if (createError) throw createError;
+  throwSupabaseError(createError, "创建家庭空间失败");
   return created as Family;
 }
 
@@ -418,14 +395,25 @@ async function ensureDiningTable(
     .select("id")
     .single();
 
-  if (error) throw error;
+  throwSupabaseError(error, "创建餐桌失败");
   return data.id as string;
 }
 
 function getRequiredClient(): SupabaseClient {
   const supabase = createBrowserSupabaseClient();
-  if (!supabase) {
-    throw new Error("Supabase 环境变量未配置");
-  }
+  if (!supabase) throw new Error("Supabase 环境变量未配置");
   return supabase;
+}
+
+function throwSupabaseError(error: unknown, fallback: string): asserts error is null | undefined {
+  if (!error) return;
+
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = String((error as { message?: unknown }).message || fallback);
+    const code = "code" in error ? String((error as { code?: unknown }).code || "") : "";
+    const details = "details" in error ? String((error as { details?: unknown }).details || "") : "";
+    throw new Error([fallback, code, message, details].filter(Boolean).join("："));
+  }
+
+  throw new Error(fallback);
 }
